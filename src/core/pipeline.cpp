@@ -13,17 +13,35 @@
 ComputePipeline::ComputePipeline(VulkanEngine& engine, const std::string& shaderPath, int width, int height)
     : engine(engine), width(width), height(height) 
 {
-    inputBuffer = outputBuffer = maskBuffer = VK_NULL_HANDLE;
-    inputMemory = outputMemory = maskMemory = VK_NULL_HANDLE;
-    descriptorSet = VK_NULL_HANDLE;
-
     createDescriptorSetLayout();
     createDescriptorPool();
     createPipeline(shaderPath);
+    createSyncObjects();
+
+    if (width > 0 && height > 0) {
+        createComputeBuffers();
+        createDescriptorSets();
+    }
 }
 
 ComputePipeline::~ComputePipeline() {
-    cleanupBuffers();
+    vkDeviceWaitIdle(engine.getDevice());
+
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        vkDestroyFence(engine.getDevice(), inFlightFences[i], nullptr);
+    }
+
+    if (!inputBuffers.empty()) {
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyBuffer(engine.getDevice(), inputBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), inputMemories[i], nullptr);
+            vkDestroyBuffer(engine.getDevice(), outputBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), outputMemories[i], nullptr);
+            vkDestroyBuffer(engine.getDevice(), maskBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), maskMemories[i], nullptr);
+        }
+    }
+    
     vkDestroyPipeline(engine.getDevice(), pipeline, nullptr);
     vkDestroyPipelineLayout(engine.getDevice(), pipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(engine.getDevice(), descriptorSetLayout, nullptr);
@@ -31,55 +49,125 @@ ComputePipeline::~ComputePipeline() {
 }
 
 void ComputePipeline::setDimensions(int w, int h) {
+    if (w == width && h == height) {
+        return;
+    }
+
+    vkDeviceWaitIdle(engine.getDevice());
+
+    if (!inputBuffers.empty()) {
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            vkDestroyBuffer(engine.getDevice(), inputBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), inputMemories[i], nullptr);
+            vkDestroyBuffer(engine.getDevice(), outputBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), outputMemories[i], nullptr);
+            vkDestroyBuffer(engine.getDevice(), maskBuffers[i], nullptr);
+            vkFreeMemory(engine.getDevice(), maskMemories[i], nullptr);
+        }
+    }
+
     width = w;
     height = h;
+
+    if (width == 0 || height == 0) return;
+
+    createComputeBuffers();
+    createDescriptorSets();
 }
 
 double ComputePipeline::processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData,
                                   const std::vector<unsigned char>& maskData) {
-    cleanupBuffers();
-    createBuffers(inputData, maskData);
-    createDescriptorSet();
-    double gpuTime = runCompute();
+    if (inputBuffers.empty()) {
+        throw std::runtime_error("Compute pipeline resources not initialized. Call setDimensions() before processing.");
+    }
+    
+    VkDevice device = engine.getDevice();
+    
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+    // --- Copy Data to GPU ---
+    void* mappedMemory;
+    vkMapMemory(device, inputMemories[currentFrame], 0, width * height * 4, 0, &mappedMemory);
+    memcpy(mappedMemory, inputData.data(), width * height * 4);
+    vkUnmapMemory(device, inputMemories[currentFrame]);
+
+    if (!maskData.empty()) {
+        vkMapMemory(device, maskMemories[currentFrame], 0, width * height * 4, 0, &mappedMemory);
+        memcpy(mappedMemory, maskData.data(), width * height * 4);
+        vkUnmapMemory(device, maskMemories[currentFrame]);
+    }
+    
+    // --- Record and Submit Commands ---
+    VkCommandBufferAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = engine.getCommandPool();
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer;
+    VK_CHECK(vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer));
+
+    VkCommandBufferBeginInfo beginInfo = {};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+    
+    VkQueryPool queryPool = engine.getQueryPool();
+    vkCmdResetQueryPool(commandBuffer, queryPool, 0, 2);
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, nullptr);
+
+    int pushConstants[2] = { width, height };
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), pushConstants);
+    
+    uint32_t groupSizeX = (width + 15) / 16;
+    uint32_t groupSizeY = (height + 15) / 16;
+    vkCmdDispatch(commandBuffer, groupSizeX, groupSizeY, 1);
+
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
+    VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+
+    VK_CHECK(vkQueueSubmit(engine.getComputeQueue(), 1, &submitInfo, inFlightFences[currentFrame]));
+    
+    // --- Wait and Retrieve Data ---
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+    uint64_t timestamps[2];
+    vkGetQueryPoolResults(device, queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+    double gpuTime = (timestamps[1] - timestamps[0]) * engine.getTimestampPeriod() / 1e6; // Time in ms
 
     VkMappedMemoryRange range = {};
     range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-    range.memory = outputMemory;
+    range.memory = outputMemories[currentFrame];
     range.offset = 0;
     range.size = width * height * 4;
-    vkInvalidateMappedMemoryRanges(engine.getDevice(), 1, &range);
-
-    void* mappedMemory;
-    vkMapMemory(engine.getDevice(), outputMemory, 0, width * height * 4, 0, &mappedMemory);
+    vkInvalidateMappedMemoryRanges(device, 1, &range);
+    
+    vkMapMemory(device, outputMemories[currentFrame], 0, width * height * 4, 0, &mappedMemory);
     outputData.resize(width * height * 4);
     memcpy(outputData.data(), mappedMemory, width * height * 4);
-    vkUnmapMemory(engine.getDevice(), outputMemory);
+    vkUnmapMemory(device, outputMemories[currentFrame]);
+    
+    vkFreeCommandBuffers(device, engine.getCommandPool(), 1, &commandBuffer);
+
+    currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 
     return gpuTime;
 }
 
 double ComputePipeline::processImage(const std::vector<unsigned char>& inputData,
                                    std::vector<unsigned char>& outputData) {
-    // Overloaded version without mask
-    cleanupBuffers();
-    createBuffers(inputData); // No maskData
-    createDescriptorSet(false); // No mask
-    double gpuTime = runCompute();
-
-    VkMappedMemoryRange range = {};
-    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-    range.memory = outputMemory;
-    range.offset = 0;
-    range.size = width * height * 4;
-    vkInvalidateMappedMemoryRanges(engine.getDevice(), 1, &range);
-
-    void* mappedMemory;
-    vkMapMemory(engine.getDevice(), outputMemory, 0, width * height * 4, 0, &mappedMemory);
-    outputData.resize(width * height * 4);
-    memcpy(outputData.data(), mappedMemory, width * height * 4);
-    vkUnmapMemory(engine.getDevice(), outputMemory);
-    
-    return gpuTime;
+    std::vector<unsigned char> dummyMask;
+    return processImage(inputData, outputData, dummyMask);
 }
 
 void ComputePipeline::createDescriptorSetLayout() {
@@ -111,12 +199,11 @@ void ComputePipeline::createDescriptorSetLayout() {
 void ComputePipeline::createDescriptorPool() {
     VkDescriptorPoolSize poolSize = {};
     poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSize.descriptorCount = 3;
+    poolSize.descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT;
 
     VkDescriptorPoolCreateInfo poolInfo = {};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
 
@@ -170,178 +257,77 @@ void ComputePipeline::createPipeline(const std::string& shaderPath)
     vkDestroyShaderModule(engine.getDevice(), shaderModule, nullptr);
 }
 
-// Modified createBuffers with optional maskData
-void ComputePipeline::createBuffers(const std::vector<unsigned char>& inputData,
-                                    const std::vector<unsigned char>& maskData) {
+void ComputePipeline::createComputeBuffers() {
     VkDeviceSize bufferSize = width * height * 4;
-    VkPhysicalDeviceProperties properties;
-    vkGetPhysicalDeviceProperties(engine.getPhysicalDevice(), &properties);
-    VkDeviceSize alignment = properties.limits.minStorageBufferOffsetAlignment;
-    bufferSize = (bufferSize + alignment - 1) & ~(alignment - 1);
-
     BufferManager bufferManager(engine);
-    bufferManager.createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            inputBuffer, inputMemory);
-    bufferManager.copyDataToBuffer(inputMemory, inputData.data(), width * height * 4);
 
-    bufferManager.createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            outputBuffer, outputMemory);
+    inputBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    inputMemories.resize(MAX_FRAMES_IN_FLIGHT);
+    outputBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    outputMemories.resize(MAX_FRAMES_IN_FLIGHT);
+    maskBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+    maskMemories.resize(MAX_FRAMES_IN_FLIGHT);
 
-    if (!maskData.empty()) {
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         bufferManager.createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                maskBuffer, maskMemory);
-        bufferManager.copyDataToBuffer(maskMemory, maskData.data(), width * height * 4);
+                                inputBuffers[i], inputMemories[i]);
+
+        bufferManager.createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                outputBuffers[i], outputMemories[i]);
+        
+        bufferManager.createBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                maskBuffers[i], maskMemories[i]);
     }
 }
 
-// Overloaded version of createBuffers (no mask)
-void ComputePipeline::createBuffers(const std::vector<unsigned char>& inputData) {
-    std::vector<unsigned char> dummy;
-    createBuffers(inputData, dummy);
-}
-
-// Modified createDescriptorSet with optional mask toggle
-void ComputePipeline::createDescriptorSet(bool useMask) {
+void ComputePipeline::createDescriptorSets() {
+    std::vector<VkDescriptorSetLayout> layouts(MAX_FRAMES_IN_FLIGHT, descriptorSetLayout);
     VkDescriptorSetAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &descriptorSetLayout;
+    allocInfo.descriptorSetCount = MAX_FRAMES_IN_FLIGHT;
+    allocInfo.pSetLayouts = layouts.data();
 
-    VK_CHECK(vkAllocateDescriptorSets(engine.getDevice(), &allocInfo, &descriptorSet));
+    descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+    VK_CHECK(vkAllocateDescriptorSets(engine.getDevice(), &allocInfo, descriptorSets.data()));
 
-    std::vector<VkDescriptorBufferInfo> bufferInfos(3);
-    bufferInfos[0].buffer = inputBuffer;
-    bufferInfos[0].offset = 0;
-    bufferInfos[0].range = width * height * 4;
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        std::vector<VkDescriptorBufferInfo> bufferInfos(3);
+        bufferInfos[0].buffer = inputBuffers[i];
+        bufferInfos[0].offset = 0;
+        bufferInfos[0].range = width * height * 4;
 
-    bufferInfos[1].buffer = outputBuffer;
-    bufferInfos[1].offset = 0;
-    bufferInfos[1].range = width * height * 4;
+        bufferInfos[1].buffer = outputBuffers[i];
+        bufferInfos[1].offset = 0;
+        bufferInfos[1].range = width * height * 4;
+        
+        bufferInfos[2].buffer = maskBuffers[i];
+        bufferInfos[2].offset = 0;
+        bufferInfos[2].range = width * height * 4;
 
-    if (useMask) {
-        if (!maskBuffer) throw std::runtime_error("Mask buffer is null in createDescriptorSet");
-        bufferInfos[2].buffer = maskBuffer;
-    } else {
-        bufferInfos[2].buffer = inputBuffer; // Dummy fallback: same as input
+        std::vector<VkWriteDescriptorSet> descriptorWrites(3);
+        for (int j = 0; j < 3; j++) {
+            descriptorWrites[j].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            descriptorWrites[j].dstSet = descriptorSets[i];
+            descriptorWrites[j].dstBinding = j;
+            descriptorWrites[j].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            descriptorWrites[j].descriptorCount = 1;
+            descriptorWrites[j].pBufferInfo = &bufferInfos[j];
+        }
+        vkUpdateDescriptorSets(engine.getDevice(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
     }
-    bufferInfos[2].offset = 0;
-    bufferInfos[2].range = width * height * 4;
-
-    std::vector<VkWriteDescriptorSet> descriptorWrites(3);
-    for (int i = 0; i < 3; i++) {
-        descriptorWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrites[i].dstSet = descriptorSet;
-        descriptorWrites[i].dstBinding = i;
-        descriptorWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        descriptorWrites[i].descriptorCount = 1;
-        descriptorWrites[i].pBufferInfo = &bufferInfos[i];
-    }
-
-    vkUpdateDescriptorSets(engine.getDevice(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
 }
 
-// Original version should now call with useMask = true
-void ComputePipeline::createDescriptorSet() {
-    createDescriptorSet(true);
-}
+void ComputePipeline::createSyncObjects() {
+    inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Start in signaled state
 
-double ComputePipeline::runCompute() {
-    VkCommandBufferAllocateInfo allocInfo = {};
-    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = engine.getCommandPool();
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-
-    VkCommandBuffer commandBuffer;
-    VK_CHECK(vkAllocateCommandBuffers(engine.getDevice(), &allocInfo, &commandBuffer));
-
-    VkCommandBufferBeginInfo beginInfo = {};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
-    
-    VkQueryPool queryPool = engine.getQueryPool();
-    vkCmdResetQueryPool(commandBuffer, queryPool, 0, 2);
-    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
-
-
-    VkMemoryBarrier barrierBefore = {};
-    barrierBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrierBefore.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    barrierBefore.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         0, 1, &barrierBefore, 0, nullptr, 0, nullptr);
-
-    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-
-    int pushConstants[2] = { width, height };
-    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), pushConstants);
-    uint32_t groupSizeX = (width + 15) / 16;
-    uint32_t groupSizeY = (height + 15) / 16;
-    vkCmdDispatch(commandBuffer, groupSizeX, groupSizeY, 1);
-
-    VkMemoryBarrier memoryBarrier = {};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                         0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-
-    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
-    VK_CHECK(vkEndCommandBuffer(commandBuffer));
-
-    VkSubmitInfo submitInfo = {};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-
-    VK_CHECK(vkQueueSubmit(engine.getComputeQueue(), 1, &submitInfo, VK_NULL_HANDLE));
-    VK_CHECK(vkQueueWaitIdle(engine.getComputeQueue()));
-
-    vkFreeCommandBuffers(engine.getDevice(), engine.getCommandPool(), 1, &commandBuffer);
-
-    uint64_t timestamps[2];
-    vkGetQueryPoolResults(engine.getDevice(), queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-
-    double gpuTime = (timestamps[1] - timestamps[0]) * engine.getTimestampPeriod() / 1e6; // Time in ms
-    return gpuTime;
-}
-
-void ComputePipeline::cleanupBuffers() {
-    if (descriptorSet != VK_NULL_HANDLE) {
-        vkFreeDescriptorSets(engine.getDevice(), descriptorPool, 1, &descriptorSet);
-        descriptorSet = VK_NULL_HANDLE;
-    }
-    if (inputBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(engine.getDevice(), inputBuffer, nullptr);
-        inputBuffer = VK_NULL_HANDLE;
-    }
-    if (outputBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(engine.getDevice(), outputBuffer, nullptr);
-        outputBuffer = VK_NULL_HANDLE;
-    }
-    if (maskBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(engine.getDevice(), maskBuffer, nullptr);
-        maskBuffer = VK_NULL_HANDLE;
-    }
-    if (inputMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(engine.getDevice(), inputMemory, nullptr);
-        inputMemory = VK_NULL_HANDLE;
-    }
-    if (outputMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(engine.getDevice(), outputMemory, nullptr);
-        outputMemory = VK_NULL_HANDLE;
-    }
-    if (maskMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(engine.getDevice(), maskMemory, nullptr);
-        maskMemory = VK_NULL_HANDLE;
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        VK_CHECK(vkCreateFence(engine.getDevice(), &fenceInfo, nullptr, &inFlightFences[i]));
     }
 }

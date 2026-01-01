@@ -61,3 +61,28 @@ This document outlines potential improvements to the Umbra codebase, focusing on
 3.  **Compositing Pass**: Run a final compositing shader. This shader would take the original image, all the temporary output buffers, and all the masks. For each pixel, it would look at the masks to decide which temporary buffer to sample from, effectively blending all the separate effects into one final image.
 
 **Benefit:** This correctly implements the intended visual effect and avoids the sequential layering of shaders. While it may require more GPU passes, it achieves the correct visual result.
+
+---
+
+## Implementation Details for Completed Optimizations
+
+This section details the specific changes made to the codebase for the optimizations that have been implemented.
+
+### Optimization #3: Vulkan Resource Management
+
+-   **Status:** Implemented
+-   **Files Changed:** `src/core/pipeline.hpp`, `src/core/pipeline.cpp`
+
+**Summary:**
+The `ComputePipeline` class was heavily refactored to eliminate the per-frame creation and destruction of Vulkan resources. Instead of allocating buffers on every call to `processImage`, a persistent pool of resources is now allocated upfront. This dramatically reduces CPU overhead and GPU stalls, leading to a significant performance increase.
+
+**Implementation Specifics:**
+1.  **Resource Pooling:** A constant `MAX_FRAMES_IN_FLIGHT` (set to 2 for double-buffering) was introduced. The `ComputePipeline` now holds `std::vector`s of `VkBuffer`, `VkDeviceMemory`, and `VkDescriptorSet` to manage a resource pool of this size.
+2.  **Upfront Allocation:** Resource creation was moved out of the `processImage` loop.
+    *   Size-independent resources (`VkPipeline`, `VkPipelineLayout`, `VkDescriptorSetLayout`) are created once in the `ComputePipeline` constructor.
+    *   Size-dependent resources (the buffer and descriptor set pools) are now created in the `setDimensions` method. This fixed a critical bug where buffers were being created with a size of 0, causing a segmentation fault.
+3.  **Synchronization with Fences:**
+    *   A pool of `VkFence` objects, one for each frame in flight, was created to manage CPU-GPU synchronization.
+    *   The `processImage` function now begins by waiting on the fence corresponding to the current resource slot (`inFlightFences[currentFrame]`). This ensures that the GPU has finished using that set of resources before the CPU tries to write new data to them.
+    *   After submitting new work to the GPU, the same fence is used to signal its completion. This replaces the inefficient, globally-blocking `vkQueueWaitIdle()` with a more precise, per-frame synchronization mechanism.
+4.  **Simplified Interface:** The internal logic of the `ComputePipeline` was refactored. The old `cleanupBuffers` and `runCompute` methods were removed, and their logic was integrated into the new resource creation and `processImage` methods, resulting in a more robust and stateful class.

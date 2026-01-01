@@ -3,7 +3,10 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
+
 class VulkanEngine;
+
+const int MAX_FRAMES_IN_FLIGHT = 2;
 
 class ComputePipeline {
 public:
@@ -21,18 +24,24 @@ private:
     VkDescriptorSetLayout descriptorSetLayout;
     VkPipelineLayout pipelineLayout;
     VkPipeline pipeline;
-    VkBuffer inputBuffer, outputBuffer, maskBuffer;
-    VkDeviceMemory inputMemory, outputMemory, maskMemory;
-    VkDescriptorSet descriptorSet;
+
+    std::vector<VkBuffer> inputBuffers;
+    std::vector<VkDeviceMemory> inputMemories;
+    std::vector<VkBuffer> outputBuffers;
+    std::vector<VkDeviceMemory> outputMemories;
+    std::vector<VkBuffer> maskBuffers;
+    std::vector<VkDeviceMemory> maskMemories;
+    std::vector<VkDescriptorSet> descriptorSets;
+
+    std::vector<VkFence> inFlightFences;
+    size_t currentFrame = 0;
+
     int width, height;
 
     void createDescriptorSetLayout();
     void createDescriptorPool();
     void createPipeline(const std::string& shaderPath);
-    void createBuffers(const std::vector<unsigned char>& inputData, const std::vector<unsigned char>& maskData);
-    void createBuffers(const std::vector<unsigned char>& inputData);
-    void createDescriptorSet();
-    void createDescriptorSet(bool useMask);
-    double runCompute();
-    void cleanupBuffers();
+    void createSyncObjects();
+    void createComputeBuffers();
+    void createDescriptorSets();
 };
