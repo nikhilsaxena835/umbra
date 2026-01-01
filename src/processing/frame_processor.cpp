@@ -89,12 +89,12 @@ void FrameProcessor::processFramesWithMask()
         //    maskDataList = prevMaskDataList;
 
         std::vector<unsigned char> outputData = inputData;
-        std::cout << "The size of maskDataList is " << maskDataList.size() << std::endl;
+        //std::cout << "The size of maskDataList is " << maskDataList.size() << std::endl;
         for (const auto& [classLabel, maskData] : maskDataList)
         {
             try
             {
-                std::cout << classLabel << " detected for frame " << i + 1 << std::endl;
+                //std::cout << classLabel << " detected for frame " << i + 1 << std::endl;
                 auto pipeline = shaderManager->getPipeline(classLabel);
                 std::vector<unsigned char> tempOutput;
                 frameGpuTime += pipeline->processImage(outputData, tempOutput, maskData);

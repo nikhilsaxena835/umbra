@@ -15,13 +15,11 @@ void MaskGenerator::generateMasks(
     int width, int height)
 {
     maskDataList.clear();
-    //std::cout << "MaskGenerator: Input classes: " << classMasks.size() << std::endl;
 
     for (const auto& [classLabel, maskList] : classMasks)
     {
         std::vector<unsigned char> combinedMask(width * height, 0);
 
-        int maskIndex = 0;
         for (const auto& mask : maskList)
         {
             if (mask.size() != static_cast<size_t>(width * height)) {
@@ -33,43 +31,17 @@ void MaskGenerator::generateMasks(
             for (int i = 0; i < width * height; ++i) {
                 combinedMask[i] |= (mask[i] > 0 ? 1 : 0);  // Pixel-wise OR
             }
-
-            // Save each individual instance mask for debugging
-            std::string debug_filename = "debug_instance_mask_" + classLabel + "_" + std::to_string(maskIndex++) + ".ppm";
-            std::ofstream debug_file(debug_filename, std::ios::binary);
-            debug_file << "P6\n" << width << " " << height << "\n255\n";
-            for (int i = 0; i < width * height; ++i) {
-                unsigned char val = mask[i];
-                debug_file.put(val).put(val).put(val);
-            }
-            debug_file.close();
         }
 
         std::vector<unsigned char> rgbaMask(width * height * 4, 0);
-        int nonZero = 0;
         for (int i = 0; i < width * height; ++i) {
             unsigned char value = (combinedMask[i] > 0) ? 0 : 255; // Invert mask
             rgbaMask[i * 4 + 0] = rgbaMask[i * 4 + 1] = rgbaMask[i * 4 + 2] = value;
             rgbaMask[i * 4 + 3] = (value > 0) ? 255 : 0;
-            if (value > 0) nonZero++;
         }
-
-        //std::cout << "MaskGenerator: Total visible pixels for " << classLabel << ": " << nonZero << " / " << (width * height) << std::endl;
-
-        // Debug final mask
-        std::string final_mask_filename = "debug_output_mask_" + classLabel + ".ppm";
-        std::ofstream final_mask_file(final_mask_filename, std::ios::binary);
-        final_mask_file << "P6\n" << width << " " << height << "\n255\n";
-        for (int i = 0; i < width * height; ++i) {
-            unsigned char val = rgbaMask[i * 4];
-            final_mask_file.put(val).put(val).put(val);
-        }
-        final_mask_file.close();
 
         maskDataList.emplace_back(classLabel, std::move(rgbaMask));
     }
-
-    //std::cout << "MaskGenerator: Output masks: " << maskDataList.size() << std::endl;
 }
 
 
