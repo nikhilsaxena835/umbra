@@ -17,6 +17,9 @@ VulkanEngine::~VulkanEngine()
     if (device) 
     {
         vkDeviceWaitIdle(device);
+        if (queryPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device, queryPool, nullptr);
+        }
         vkDestroyCommandPool(device, commandPool, nullptr);
         vkDestroyDevice(device, nullptr);
         vkDestroyInstance(instance, nullptr);
@@ -50,17 +53,29 @@ void VulkanEngine::setupDevice()
     for (uint32_t i = 0; i < deviceCount; i++) 
         std::cout << "Device " << i+1 << " with handle " << devices[i] << std::endl;
     
-    for (auto device : devices) 
+    for (auto dev : devices) 
     {
-        VkPhysicalDeviceProperties properties;
-        vkGetPhysicalDeviceProperties(device, &properties);
-        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) 
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(dev, &props);
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) 
         {
-            physicalDevice = device;
-            std::cout << "Selected Device: " << properties.deviceName << std::endl;
+            physicalDevice = dev;
+            std::cout << "Selected Device: " << props.deviceName << std::endl;
             break;
         }
     }
+
+    if (physicalDevice == VK_NULL_HANDLE && deviceCount > 0) {
+        physicalDevice = devices[0];
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(physicalDevice, &props);
+        std::cout << "No discrete GPU found, selected device: " << props.deviceName << std::endl;
+    }
+
+
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(physicalDevice, &properties);
+    timestampPeriod = properties.limits.timestampPeriod;
 
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
@@ -71,8 +86,10 @@ void VulkanEngine::setupDevice()
     {
         if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) 
         {
-            computeQueueFamilyIndex = i;
-            break;
+            if (queueFamilies[i].timestampValidBits > 0) {
+                computeQueueFamilyIndex = i;
+                break;
+            }
         }
     }
 
@@ -97,4 +114,11 @@ void VulkanEngine::setupDevice()
     poolInfo.queueFamilyIndex = computeQueueFamilyIndex;
 
     VK_CHECK(vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool));
+
+    VkQueryPoolCreateInfo queryPoolInfo = {};
+    queryPoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    queryPoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    queryPoolInfo.queryCount = 2; // For start and end timestamps
+
+    VK_CHECK(vkCreateQueryPool(device, &queryPoolInfo, nullptr, &queryPool));
 }

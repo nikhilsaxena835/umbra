@@ -15,6 +15,8 @@ public:
     VkQueue getComputeQueue() const { return computeQueue; }
     uint32_t getComputeQueueFamily() const { return computeQueueFamilyIndex; }
     VkCommandPool getCommandPool() const { return commandPool; }
+    VkQueryPool getQueryPool() const { return queryPool; }
+    float getTimestampPeriod() const { return timestampPeriod; }
 
 private:
     VkInstance instance;
@@ -23,6 +25,8 @@ private:
     VkQueue computeQueue;
     uint32_t computeQueueFamilyIndex;
     VkCommandPool commandPool;
+    VkQueryPool queryPool;
+    float timestampPeriod;
 
     void createInstance();
     void setupDevice();

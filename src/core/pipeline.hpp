@@ -10,9 +10,9 @@ public:
     ComputePipeline(VulkanEngine& engine, const std::string& shaderPath, int width, int height);
     ~ComputePipeline();
 
-    void processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData,
+    double processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData,
                       const std::vector<unsigned char>& maskData);
-    void processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData);
+    double processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData);
     void setDimensions(int width, int height);
 
 private:
@@ -33,6 +33,6 @@ private:
     void createBuffers(const std::vector<unsigned char>& inputData);
     void createDescriptorSet();
     void createDescriptorSet(bool useMask);
-    void runCompute();
+    double runCompute();
     void cleanupBuffers();
 };

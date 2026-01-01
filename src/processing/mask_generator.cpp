@@ -15,7 +15,7 @@ void MaskGenerator::generateMasks(
     int width, int height)
 {
     maskDataList.clear();
-    std::cout << "MaskGenerator: Input classes: " << classMasks.size() << std::endl;
+    //std::cout << "MaskGenerator: Input classes: " << classMasks.size() << std::endl;
 
     for (const auto& [classLabel, maskList] : classMasks)
     {
@@ -54,7 +54,7 @@ void MaskGenerator::generateMasks(
             if (value > 0) nonZero++;
         }
 
-        std::cout << "MaskGenerator: Total visible pixels for " << classLabel << ": " << nonZero << " / " << (width * height) << std::endl;
+        //std::cout << "MaskGenerator: Total visible pixels for " << classLabel << ": " << nonZero << " / " << (width * height) << std::endl;
 
         // Debug final mask
         std::string final_mask_filename = "debug_output_mask_" + classLabel + ".ppm";
@@ -69,7 +69,7 @@ void MaskGenerator::generateMasks(
         maskDataList.emplace_back(classLabel, std::move(rgbaMask));
     }
 
-    std::cout << "MaskGenerator: Output masks: " << maskDataList.size() << std::endl;
+    //std::cout << "MaskGenerator: Output masks: " << maskDataList.size() << std::endl;
 }
 
 

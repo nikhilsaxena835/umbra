@@ -35,12 +35,12 @@ void ComputePipeline::setDimensions(int w, int h) {
     height = h;
 }
 
-void ComputePipeline::processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData,
+double ComputePipeline::processImage(const std::vector<unsigned char>& inputData, std::vector<unsigned char>& outputData,
                                   const std::vector<unsigned char>& maskData) {
     cleanupBuffers();
     createBuffers(inputData, maskData);
     createDescriptorSet();
-    runCompute();
+    double gpuTime = runCompute();
 
     VkMappedMemoryRange range = {};
     range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -54,15 +54,17 @@ void ComputePipeline::processImage(const std::vector<unsigned char>& inputData, 
     outputData.resize(width * height * 4);
     memcpy(outputData.data(), mappedMemory, width * height * 4);
     vkUnmapMemory(engine.getDevice(), outputMemory);
+
+    return gpuTime;
 }
 
-void ComputePipeline::processImage(const std::vector<unsigned char>& inputData,
+double ComputePipeline::processImage(const std::vector<unsigned char>& inputData,
                                    std::vector<unsigned char>& outputData) {
     // Overloaded version without mask
     cleanupBuffers();
     createBuffers(inputData); // No maskData
     createDescriptorSet(false); // No mask
-    runCompute();
+    double gpuTime = runCompute();
 
     VkMappedMemoryRange range = {};
     range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
@@ -76,6 +78,8 @@ void ComputePipeline::processImage(const std::vector<unsigned char>& inputData,
     outputData.resize(width * height * 4);
     memcpy(outputData.data(), mappedMemory, width * height * 4);
     vkUnmapMemory(engine.getDevice(), outputMemory);
+    
+    return gpuTime;
 }
 
 void ComputePipeline::createDescriptorSetLayout() {
@@ -110,7 +114,7 @@ void ComputePipeline::createDescriptorPool() {
     poolSize.descriptorCount = 3;
 
     VkDescriptorPoolCreateInfo poolInfo = {};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = 1;
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     poolInfo.poolSizeCount = 1;
@@ -245,7 +249,7 @@ void ComputePipeline::createDescriptorSet() {
     createDescriptorSet(true);
 }
 
-void ComputePipeline::runCompute() {
+double ComputePipeline::runCompute() {
     VkCommandBufferAllocateInfo allocInfo = {};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = engine.getCommandPool();
@@ -260,6 +264,11 @@ void ComputePipeline::runCompute() {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+    
+    VkQueryPool queryPool = engine.getQueryPool();
+    vkCmdResetQueryPool(commandBuffer, queryPool, 0, 2);
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, 0);
+
 
     VkMemoryBarrier barrierBefore = {};
     barrierBefore.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -286,6 +295,7 @@ void ComputePipeline::runCompute() {
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
                          0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPool, 1);
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 
     VkSubmitInfo submitInfo = {};
@@ -297,6 +307,12 @@ void ComputePipeline::runCompute() {
     VK_CHECK(vkQueueWaitIdle(engine.getComputeQueue()));
 
     vkFreeCommandBuffers(engine.getDevice(), engine.getCommandPool(), 1, &commandBuffer);
+
+    uint64_t timestamps[2];
+    vkGetQueryPoolResults(engine.getDevice(), queryPool, 0, 2, sizeof(timestamps), timestamps, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+    double gpuTime = (timestamps[1] - timestamps[0]) * engine.getTimestampPeriod() / 1e6; // Time in ms
+    return gpuTime;
 }
 
 void ComputePipeline::cleanupBuffers() {

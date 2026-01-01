@@ -5,6 +5,8 @@
 #include <iostream>
 #include <set>
 #include <map>
+#include <chrono>
+#include <numeric>
 #include "config.h"
 
 namespace fs = std::filesystem;
@@ -53,6 +55,9 @@ void FrameProcessor::processFramesWithMask()
 
     fs::create_directories(outputDir);
 
+    double totalGpuTime = 0;
+    double totalCpuTime = 0;
+
     std::vector<unsigned char> firstFrameData;
     loadPPMImage(frames[0].c_str(), firstFrameData, width, height);
     shaderManager->setDimensions(width, height);
@@ -63,6 +68,9 @@ void FrameProcessor::processFramesWithMask()
     std::vector<std::pair<std::string, std::vector<unsigned char>>> prevMaskDataList;
     for (size_t i = 0; i < frames.size(); ++i)
     {
+        auto cpuFrameStart = std::chrono::high_resolution_clock::now();
+        double frameGpuTime = 0;
+
         std::vector<unsigned char> inputData;
         loadPPMImage(frames[i].c_str(), inputData, width, height);
 
@@ -89,7 +97,7 @@ void FrameProcessor::processFramesWithMask()
                 std::cout << classLabel << " detected for frame " << i + 1 << std::endl;
                 auto pipeline = shaderManager->getPipeline(classLabel);
                 std::vector<unsigned char> tempOutput;
-                pipeline->processImage(outputData, tempOutput, maskData);
+                frameGpuTime += pipeline->processImage(outputData, tempOutput, maskData);
                 outputData = std::move(tempOutput);
             }
             catch (const std::runtime_error& e)
@@ -102,9 +110,22 @@ void FrameProcessor::processFramesWithMask()
         std::string outputFile = outputDir + "/processed_frame_" + std::to_string(i + 1) + ".ppm";
         savePPMImage(outputFile.c_str(), outputData, width, height);
 
+        auto cpuFrameEnd = std::chrono::high_resolution_clock::now();
+        totalCpuTime += std::chrono::duration<double, std::milli>(cpuFrameEnd - cpuFrameStart).count();
+        totalGpuTime += frameGpuTime;
+
         std::cout << "Processed frame " << (i + 1) << "/" << frames.size() << "\r" << std::flush;
     }
     std::cout << "\nFinished processing all frames" << std::endl;
+    
+    std::cout << "----------- Performance Stats -----------" << std::endl;
+    std::cout << "Total frames processed: " << frames.size() << std::endl;
+    std::cout << "Total CPU time: " << totalCpuTime << " ms" << std::endl;
+    std::cout << "Total GPU time: " << totalGpuTime << " ms" << std::endl;
+    std::cout << "Average CPU time per frame: " << totalCpuTime / frames.size() << " ms" << std::endl;
+    std::cout << "Average GPU time per frame: " << totalGpuTime / frames.size() << " ms" << std::endl;
+    std::cout << "---------------------------------------" << std::endl;
+
 }
 
 
@@ -116,6 +137,9 @@ void FrameProcessor::processFrames()
 
     fs::create_directories(outputDir);
 
+    double totalGpuTime = 0;
+    double totalCpuTime = 0;
+
     std::vector<unsigned char> firstFrameData;
     loadPPMImage(frames[0].c_str(), firstFrameData, width, height);
     shaderManager->setDimensions(width, height);
@@ -124,19 +148,31 @@ void FrameProcessor::processFrames()
     
     for (size_t i = 0; i < frames.size(); ++i)
     {
+        auto cpuFrameStart = std::chrono::high_resolution_clock::now();
+
         std::vector<unsigned char> inputData;
         loadPPMImage(frames[i].c_str(), inputData, width, height);
         
         std::vector<unsigned char> outputData;
-        std::vector<unsigned char> dummyMask;  // Leave empty
-        pipeline->processImage(inputData, outputData);
-        std::cout << "here " << std::endl;
+        double gpuTime = pipeline->processImage(inputData, outputData);
+        totalGpuTime += gpuTime;
 
         std::string outputFile = outputDir + "/processed_frame_" + std::to_string(i + 1) + ".ppm";
         savePPMImage(outputFile.c_str(), outputData, width, height);
+
+        auto cpuFrameEnd = std::chrono::high_resolution_clock::now();
+        totalCpuTime += std::chrono::duration<double, std::milli>(cpuFrameEnd - cpuFrameStart).count();
 
         std::cout << "Processed frame " << (i + 1) << "/" << frames.size() << "\r" << std::flush;
     }
 
     std::cout << "\nFinished processing all frames" << std::endl;
+
+    std::cout << "----------- Performance Stats -----------" << std::endl;
+    std::cout << "Total frames processed: " << frames.size() << std::endl;
+    std::cout << "Total CPU time: " << totalCpuTime << " ms" << std::endl;
+    std::cout << "Total GPU time: " << totalGpuTime << " ms" << std::endl;
+    std::cout << "Average CPU time per frame: " << totalCpuTime / frames.size() << " ms" << std::endl;
+    std::cout << "Average GPU time per frame: " << totalGpuTime / frames.size() << " ms" << std::endl;
+    std::cout << "---------------------------------------" << std::endl;
 }
