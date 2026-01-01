@@ -27,20 +27,20 @@ int main(int argc, char* argv[])
                 throw std::runtime_error("ffmpeg is not installed. Please install ffmpeg to continue.");
             
         std::string videoPath;
-        std::string shaderPath;
+        std::string shaderName;
         bool objectDetection = false;
         std::cout << argc << std::endl;
         if (argc == 4) 
         {   
             videoPath = argv[1];
-            shaderPath = argv[2];
+            shaderName = argv[2];
             std::string temp = argv[3];
             if(temp == "true")
             objectDetection = true;
         }
         else 
         {
-            std::cout << "Incorrect syntax : ./main <path_to_video_file> <compiled_shader_path> <flag_object_detection> ";
+            std::cout << "Incorrect syntax : ./main <path_to_video_file> <shader_name> <flag_object_detection> ";
             return EXIT_SUCCESS;
         }
     
@@ -65,7 +65,7 @@ int main(int argc, char* argv[])
         }
         else{
             std::cout << "Applying shaders ..." << std::endl;
-            FrameProcessor fp (engine, tempFramesDir, processedFramesDir, shaderPath);
+            FrameProcessor fp (engine, tempFramesDir, processedFramesDir, shaderName);
             fp.processFrames();
         }
 

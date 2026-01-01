@@ -25,7 +25,7 @@ private:
     std::unique_ptr<ShaderManager> shaderManager;
     std::unique_ptr<ObjectDetector> objectDetector;
     std::unique_ptr<MaskGenerator> maskGenerator;
-    std::string inputDir, outputDir;
+    std::string inputDir, outputDir, shaderName;
     int width, height;
 
     std::vector<std::string> getSortedFrames();

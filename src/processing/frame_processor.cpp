@@ -19,12 +19,11 @@ FrameProcessor::FrameProcessor(VulkanEngine& engine, const std::string& inputDir
     maskGenerator = std::make_unique<MaskGenerator>();
 }
 
-FrameProcessor::FrameProcessor(VulkanEngine& engine, const std::string& inputDir, const std::string& outputDir, const std::string& shaderPath)
-    : engine(engine), inputDir(inputDir), outputDir(outputDir), width(0), height(0)
+FrameProcessor::FrameProcessor(VulkanEngine& engine, const std::string& inputDir, const std::string& outputDir, const std::string& shaderName)
+    : engine(engine), inputDir(inputDir), outputDir(outputDir), shaderName(shaderName), width(0), height(0)
 {
     shaderManager = std::make_unique<ShaderManager>(engine);
-    //const std::string temp = "../grayscale.spv";
-    shaderManager->loadShader(shaderPath);
+    shaderManager->loadShader(shaderName);
 }
 
 FrameProcessor::~FrameProcessor() {}
@@ -120,7 +119,8 @@ void FrameProcessor::processFrames()
     std::vector<unsigned char> firstFrameData;
     loadPPMImage(frames[0].c_str(), firstFrameData, width, height);
     shaderManager->setDimensions(width, height);
-    auto grayscalePipeline = shaderManager->getPipeline("classic");
+    
+    auto pipeline = shaderManager->getPipeline(shaderName);
     
     for (size_t i = 0; i < frames.size(); ++i)
     {
@@ -129,7 +129,7 @@ void FrameProcessor::processFrames()
         
         std::vector<unsigned char> outputData;
         std::vector<unsigned char> dummyMask;  // Leave empty
-        grayscalePipeline->processImage(inputData, outputData);
+        pipeline->processImage(inputData, outputData);
         std::cout << "here " << std::endl;
 
         std::string outputFile = outputDir + "/processed_frame_" + std::to_string(i + 1) + ".ppm";
